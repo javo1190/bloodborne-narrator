@@ -138,9 +138,6 @@ module.exports = async (req, res) => {
     return res.status(200).json({ url: publicUrl });
 
 
-    // 3) Public URL
-    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${encodeURIComponent(BUCKET)}/${encodeURIComponent(objectPath)}`;
-
     // CORS (optional: lets you call from browser tools)
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
