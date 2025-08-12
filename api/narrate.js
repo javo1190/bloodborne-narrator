@@ -101,13 +101,6 @@ module.exports = async (req, res) => {
         }
       } catch (_) {}
     }
-    // === Fin bloque determinista ===
-
-
-    const narrationText = String(text).trim();
-    if (!narrationText) {
-      return res.status(400).json({ error: "text must be a non-empty string" });
-    }
 
     // 1) Call ElevenLabs TTS -> MP3 bytes
         const tts = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE}`, {
