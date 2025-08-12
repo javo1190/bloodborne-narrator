@@ -1,38 +1,23 @@
 // api/narrate.js
-// One-file serverless function for Vercel (Node.js)
-// - POST /api/narrate { title, campaign, text } -> { url }
-// Env vars to set on Vercel:
-// ELEVEN_API_KEY, ELEVEN_VOICE_ID, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUCKET (optional, default 'audio')
-
-function safeName(s) {
-  return String(s || "")
-    .trim()
-    .replace(/[^\w\-]+/g, "_")     // keep letters, numbers, underscore
-    .replace(/_+/g, "_")
-    .slice(0, 120);
-}
+// POST /api/narrate { title, campaign, text, voiceId? } -> { url }
 
 const crypto = require('node:crypto');
 
-// Normaliza un poco el texto para evitar hashes distintos por espacios o saltos de línea
 function normalizeText(s) {
   return String(s || '')
     .trim()
-    .replace(/\r\n/g, '\n')       // CRLF -> LF
-    .replace(/[ \t]+/g, ' ')      // colapsa espacios/tabs
-    .replace(/\n{3,}/g, '\n\n');  // como mucho dos saltos seguidos
+    .replace(/\r\n/g, '\n')      // CRLF -> LF
+    .replace(/[ \t]+/g, ' ')     // colapsa espacios/tabs
+    .replace(/\n{3,}/g, '\n\n'); // como mucho 2 saltos seguidos
 }
 
-// Hash SHA-256 y nos quedamos con 8 caracteres (suficiente para diferenciar)
 function digest8(s) {
   return crypto.createHash('sha256').update(s).digest('hex').slice(0, 8);
 }
 
-// (opcional; si ya la tienes, deja tu versión)
-// Quita acentos y deja un nombre limpio para el archivo
 function safeName(s) {
   return String(s || '')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quita acentos
     .trim()
     .replace(/[^\w\-]+/g, '_')
     .replace(/_+/g, '_')
@@ -41,11 +26,17 @@ function safeName(s) {
 
 module.exports = async (req, res) => {
   try {
+    // CORS básico (útil para probar desde navegador/Actions)
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (req.method === "OPTIONS") return res.status(200).end();
+
     if (req.method === "GET") {
       return res.status(200).json({ ok: true, hint: "POST {title,campaign,text} to get an MP3 URL." });
     }
     if (req.method !== "POST") {
-      res.setHeader("Allow", "POST, GET");
+      res.setHeader("Allow", "POST, GET, OPTIONS");
       return res.status(405).json({ error: "Method not allowed" });
     }
 
@@ -60,50 +51,49 @@ module.exports = async (req, res) => {
     }
 
     const body = req.body || {};
-    const { title, campaign, text } = body;
+    const { title, campaign, text, voiceId } = body;
 
     if (!title || !campaign || !text) {
       return res.status(400).json({ error: "title, campaign, and text are required" });
     }
-        // === Nombre de archivo determinista (anti-duplicados) ===
+
+    // === Nombre de archivo determinista (anti-duplicados) ===
     const narrationText = String(text).trim();
-    if (!narrationText) {
-      return res.status(400).json({ error: "text must be non-empty" });
-    }
+    if (!narrationText) return res.status(400).json({ error: "text must be non-empty" });
 
-    // Normaliza el texto para evitar hashes distintos por espacios/saltos
     const normalized = normalizeText(narrationText);
+    const VOICE = voiceId || ELEVEN_VOICE_ID;
 
-    // Usa la voz en el hash para que otra voz genere otro archivo
-    const VOICE = /* si implementaste voz por body: (voiceId || ELEVEN_VOICE_ID) */ ELEVEN_VOICE_ID;
+    // hash incluye la voz para diferenciar audios con voces distintas
     const hash = digest8(`${VOICE}::${normalized}`);
 
-    // Path estable sin Date.now()
     const folder = 'cards';
     const filename = `${safeName(campaign)}__${safeName(title)}--${hash}.mp3`;
     const objectPath = `${folder}/${filename}`;
 
-    // URL pública que vamos a devolver
+    // URL pública estable (no codifiques la "/")
     const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${objectPath}`;
 
-    // (Opcional) si el archivo ya existe, devolvemos cache y salimos
+    // Si ya existe el archivo público, devuelve directamente la URL (sin "cached")
     try {
       const head = await fetch(publicUrl, { method: 'HEAD' });
       if (head.ok) {
+        console.log("narrate OK (cache)", { path: objectPath });
         return res.status(200).json({ url: publicUrl });
       }
     } catch (_) {
-      // fallback suave: intenta leer 1 byte
       try {
         const tiny = await fetch(publicUrl, { headers: { Range: 'bytes=0-1' } });
         if (tiny.ok) {
+          console.log("narrate OK (range cache)", { path: objectPath });
           return res.status(200).json({ url: publicUrl });
         }
       } catch (_) {}
     }
+    // === Fin bloque determinista ===
 
-    // 1) Call ElevenLabs TTS -> MP3 bytes
-        const tts = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE}`, {
+    // 1) ElevenLabs TTS
+    const tts = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE}`, {
       method: "POST",
       headers: {
         "accept": "audio/mpeg",
@@ -118,14 +108,21 @@ module.exports = async (req, res) => {
       })
     });
 
+    if (!tts.ok) {
+      const detail = await tts.text().catch(() => "");
+      return res.status(tts.status).json({ error: "ElevenLabs TTS failed", detail });
+    }
 
-    // 2) Upload to Supabase Storage (public bucket)
-       const up = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${objectPath}`, {
+    const mp3Buffer = Buffer.from(await tts.arrayBuffer());
+
+    // 2) Subir a Supabase (no codifiques el path completo)
+    const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${objectPath}`;
+    const up = await fetch(uploadUrl, {
       method: "POST",
       headers: {
         "Content-Type": "audio/mpeg",
         "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        "x-upsert": "true" // si decides regenerar, sobreescribe
+        "x-upsert": "true" // sobreescribe si existía
       },
       body: mp3Buffer
     });
@@ -135,17 +132,10 @@ module.exports = async (req, res) => {
       return res.status(up.status).json({ error: "Supabase upload failed", detail });
     }
 
+    console.log("narrate GENERATED", { path: objectPath, size: mp3Buffer.length });
     return res.status(200).json({ url: publicUrl });
 
-
-    // CORS (optional: lets you call from browser tools)
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-    return res.status(200).json({ url: publicUrl });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "server error" });
   }
 };
-
