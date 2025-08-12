@@ -90,14 +90,14 @@ module.exports = async (req, res) => {
     try {
       const head = await fetch(publicUrl, { method: 'HEAD' });
       if (head.ok) {
-        return res.status(200).json({ url: publicUrl, cached: true });
+        return res.status(200).json({ url: publicUrl });
       }
     } catch (_) {
       // fallback suave: intenta leer 1 byte
       try {
         const tiny = await fetch(publicUrl, { headers: { Range: 'bytes=0-1' } });
         if (tiny.ok) {
-          return res.status(200).json({ url: publicUrl, cached: true });
+          return res.status(200).json({ url: publicUrl });
         }
       } catch (_) {}
     }
@@ -148,3 +148,4 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: e?.message || "server error" });
   }
 };
+
